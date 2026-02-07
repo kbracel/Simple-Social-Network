@@ -1,0 +1,266 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: |
+  AWS CloudFormation LAMP Stack Template
+  Creates a LAMP stack with MySQL, Apache2, PHP 8.3, Let's Encrypt SSL certificates,
+  and automatic certificate renewal via Certbot on Ubuntu 24.04 LTS
+
+Parameters:
+  KeyName:
+    Default: my-keypair
+    Description: Name of an existing EC2 KeyPair to enable SSH access to the instance
+    Type: AWS::EC2::KeyPair::KeyName
+    ConstraintDescription: must be the name of an existing EC2 KeyPair
+
+  DBName:
+    Default: MyDatabase
+    Description: MySQL database name
+    Type: String
+    MinLength: 1
+    MaxLength: 64
+    AllowedPattern: '[a-zA-Z][a-zA-Z0-9]*'
+    ConstraintDescription: must begin with a letter and contain only alphanumeric characters
+
+  DBUser:
+    Default: admin
+    NoEcho: true
+    Description: Username for MySQL database access
+    Type: String
+    MinLength: 1
+    MaxLength: 16
+    AllowedPattern: '[a-zA-Z][a-zA-Z0-9]*'
+    ConstraintDescription: must begin with a letter and contain only alphanumeric characters
+
+  DBPassword:
+    NoEcho: true
+    Description: Password for MySQL database access
+    Type: String
+    MinLength: 1
+    MaxLength: 41
+    AllowedPattern: '[a-zA-Z0-9]*'
+    ConstraintDescription: must contain only alphanumeric characters
+
+  DBRootPassword:
+    NoEcho: true
+    Description: Root password for MySQL
+    Type: String
+    MinLength: 1
+    MaxLength: 41
+    AllowedPattern: '[a-zA-Z0-9]*'
+    ConstraintDescription: must contain only alphanumeric characters
+
+  SSHLocation:
+    Description: The IP address range that can be used to SSH to the EC2 instances and access MySQL
+    Type: String
+    MinLength: 9
+    MaxLength: 18
+    AllowedPattern: '(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})/(\d{1,2})'
+    ConstraintDescription: must be a valid IP CIDR range of the form x.x.x.x/x
+
+  ElasticIPAllocationId:
+    Description: The Allocation ID of the Elastic IP to associate with the instance
+    Type: String
+    ConstraintDescription: must be a valid Elastic IP Allocation ID (e.g., eipalloc-xxxxxxxxx)
+
+  CertbotEmail:
+    Description: Email address for Let's Encrypt certificate notifications
+    Type: String
+    AllowedPattern: '^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    ConstraintDescription: must be a valid email address
+
+  DomainName:
+    Description: Primary domain name for the site (e.g., social.kyleracel.com)
+    Type: String
+    AllowedPattern: '^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    ConstraintDescription: must be a valid domain name
+
+Resources:
+  WebServerInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: ami-0b6c6ebed2801a5cb
+      InstanceType: t3.small
+      SecurityGroups:
+        - !Ref WebServerSecurityGroup
+      KeyName: !Ref KeyName
+      UserData:
+        Fn::Base64: 
+          Fn::Sub: |
+            #!/bin/bash -xe
+            exec > >(tee /var/log/user-data.log)
+            exec 2>&1
+
+            echo 'Starting LAMP stack setup...'
+            set -e
+
+            # 1. Update and Install packages
+            export DEBIAN_FRONTEND=noninteractive
+            echo 'Updating package list...'
+            apt-get update
+            
+            echo 'Installing LAMP stack components...'
+            apt-get install -y mysql-server apache2 php php-mysql libapache2-mod-php certbot python3-certbot-apache dnsutils
+
+            # 2. Configure MySQL
+            echo 'Setting MySQL root password...'
+            mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '${DBRootPassword}';"
+
+            echo 'Creating database and user...'
+            mysql -u root -p'${DBRootPassword}' <<MYSQL_SCRIPT
+            CREATE DATABASE IF NOT EXISTS ${DBName};
+            CREATE USER IF NOT EXISTS '${DBUser}'@'localhost' IDENTIFIED BY '${DBPassword}';
+            GRANT ALL PRIVILEGES ON ${DBName}.* TO '${DBUser}'@'localhost';
+            FLUSH PRIVILEGES;
+            MYSQL_SCRIPT
+
+            # 3. Configure Apache (before SSL)
+            echo 'Enabling Apache modules...'
+            a2enmod ssl
+            a2enmod rewrite
+            a2enmod headers
+
+            # Create Apache VirtualHost configuration with proper ServerName/ServerAlias
+            echo 'Creating Apache VirtualHost configuration...'
+            cat > /etc/apache2/sites-available/${DomainName}.conf <<APACHECONF
+            <VirtualHost *:80>
+                ServerName ${DomainName}
+                ServerAlias www.${DomainName}
+                DocumentRoot /var/www/html
+                
+                <Directory /var/www/html>
+                    Options Indexes FollowSymLinks
+                    AllowOverride All
+                    Require all granted
+                </Directory>
+                
+                ErrorLog /var/log/apache2/error.log
+                CustomLog /var/log/apache2/access.log combined
+            </VirtualHost>
+            APACHECONF
+
+            # Disable default site and enable our new site
+            a2dissite 000-default.conf
+            a2ensite ${DomainName}.conf
+
+            # Ensure Apache is running before Certbot
+            systemctl enable apache2
+            systemctl restart apache2
+            
+            # Wait for Apache to be fully ready
+            echo 'Waiting for Apache to be fully ready...'
+            sleep 15
+            
+            # Test that Apache is responding locally
+            echo 'Testing Apache locally...'
+            if curl -s http://localhost/ > /dev/null; then
+                echo 'Apache is responding!'
+            else
+                echo 'WARNING: Apache not responding yet'
+            fi
+
+            # Verify services are running
+            echo 'Verifying services...'
+            systemctl is-active apache2
+            systemctl is-active mysql
+            echo 'LAMP stack setup completed successfully!'
+
+            # Signal CloudFormation success NOW so it can associate the Elastic IP
+            # (EIP association depends on this signal completing)
+            echo 'Installing CloudFormation helper scripts...'
+            apt-get install -y python3-pip
+            pip3 install --break-system-packages https://s3.amazonaws.com/cloudformation-examples/aws-cfn-bootstrap-py3-latest.tar.gz
+            /usr/local/bin/cfn-signal -e 0 --stack ${AWS::StackName} --resource WebServerInstance --region ${AWS::Region}
+            echo 'CloudFormation signal sent. Waiting for Elastic IP association...'
+
+            # From here on, don't exit on errors - SSL is a bonus
+            set +e
+
+            # Wait for Elastic IP association and DNS propagation
+            echo 'Waiting for Elastic IP and DNS propagation...'
+            IMDS_TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+            DNS_READY=false
+            for i in {1..30}; do
+                INSTANCE_IP=$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" http://169.254.169.254/latest/meta-data/public-ipv4)
+                RESOLVED_IP=$(dig +short ${DomainName} | tail -n1)
+                echo "Attempt $i: Instance IP=$INSTANCE_IP, DNS resolved IP=$RESOLVED_IP"
+                
+                if [ -z "$INSTANCE_IP" ]; then
+                    echo "Public IP not assigned yet (Elastic IP not associated)..."
+                elif [ "$RESOLVED_IP" = "$INSTANCE_IP" ]; then
+                    echo "DNS propagated successfully! Domain resolves to this instance."
+                    DNS_READY=true
+                    break
+                fi
+                
+                if [ $i -lt 30 ]; then
+                    sleep 10
+                fi
+            done
+
+            if [ "$DNS_READY" = false ]; then
+                echo "WARNING: DNS did not propagate within 5 minutes."
+                echo "SSL certificate generation may fail. You can manually run:"
+                echo "sudo certbot --apache -d ${DomainName} -d www.${DomainName}"
+            fi
+
+            # 4. Generate SSL certificate using Apache plugin
+            echo 'Generating SSL certificate...'
+            if certbot --apache \
+              -d ${DomainName} \
+              -d www.${DomainName} \
+              -n \
+              --agree-tos \
+              --email ${CertbotEmail} \
+              --redirect; then
+                echo 'SSL certificate successfully installed!'
+                
+                # Setup automatic certificate renewal
+                echo 'Setting up automatic certificate renewal...'
+                systemctl enable certbot.timer
+                systemctl start certbot.timer
+            else
+                echo 'WARNING: SSL certificate generation failed.'
+                echo 'You can manually run: sudo certbot --apache -d ${DomainName} -d www.${DomainName}'
+            fi
+
+            # 5. Final Apache restart
+            echo 'Restarting Apache...'
+            systemctl restart apache2
+
+            echo 'All done!'
+
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT15M
+
+  ElasticIPAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      AllocationId: !Ref ElasticIPAllocationId
+      InstanceId: !Ref WebServerInstance
+
+  WebServerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable HTTP, HTTPS, SSH, and MySQL access
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref SSHLocation
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          CidrIp: !Ref SSHLocation
+
+Outputs:
+  WebsiteURL:
+    Description: URL for newly created LAMP stack
+    Value: !Sub 'http://${WebServerInstance.PublicDnsName}'

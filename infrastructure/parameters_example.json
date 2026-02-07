@@ -1,0 +1,26 @@
+[
+  {
+    "ParameterKey": "DBPassword",
+    "ParameterValue": "YourSecurePasswordHere123"
+  },
+  {
+    "ParameterKey": "DBRootPassword",
+    "ParameterValue": "YourSecureRootPasswordHere123"
+  },
+  {
+    "ParameterKey": "SSHLocation",
+    "ParameterValue": "YOUR_IP_ADDRESS/32"
+  },
+  {
+    "ParameterKey": "ElasticIPAllocationId",
+    "ParameterValue": "eipalloc-xxxxxxxxx"
+  },
+  {
+    "ParameterKey": "CertbotEmail",
+    "ParameterValue": "your-email@example.com"
+  },
+  {
+    "ParameterKey": "DomainName",
+    "ParameterValue": "yourdomain.com"
+  }
+]
