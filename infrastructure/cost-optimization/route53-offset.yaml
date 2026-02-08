@@ -1,0 +1,106 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: CloudFront free tier distribution to offset Route 53 hosted zone costs
+  
+Parameters:
+  HostedZoneId:
+    Type: String
+    AllowedPattern: '^Z[A-Z0-9]+$'
+  
+  DomainName:
+    Type: String
+    Default: yourdomain.com
+    AllowedPattern: '^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+  
+  OffsetSubdomain:
+    Type: String
+    Default: cost-offset
+    AllowedPattern: '^[a-zA-Z0-9-]+$'
+
+Resources:
+  OffsetCertificate:
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      DomainName: !Sub '${OffsetSubdomain}.${DomainName}'
+      ValidationMethod: DNS
+      DomainValidationOptions:
+        - DomainName: !Sub '${OffsetSubdomain}.${DomainName}'
+          HostedZoneId: !Ref HostedZoneId
+      Tags:
+        - Key: Purpose
+          Value: Route53-Cost-Offset
+
+  OffsetDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Comment: !Sub 'Route 53 cost offset for ${DomainName}'
+        Enabled: true
+        PriceClass: PriceClass_100
+        HttpVersion: http2and3
+        IPV6Enabled: true
+        Aliases:
+          - !Sub '${OffsetSubdomain}.${DomainName}'
+        ViewerCertificate:
+          AcmCertificateArn: !Ref OffsetCertificate
+          MinimumProtocolVersion: TLSv1.2_2021
+          SslSupportMethod: sni-only
+        Origins:
+          - Id: OffsetOrigin
+            DomainName: !Ref DomainName
+            CustomOriginConfig:
+              HTTPPort: 80
+              HTTPSPort: 443
+              OriginProtocolPolicy: https-only
+              OriginSSLProtocols:
+                - TLSv1.2
+        DefaultCacheBehavior:
+          TargetOriginId: OffsetOrigin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods:
+            - GET
+            - HEAD
+          CachedMethods:
+            - GET
+            - HEAD
+          Compress: true
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 404
+            ResponsePagePath: /
+          - ErrorCode: 404
+            ResponseCode: 404
+            ResponsePagePath: /
+      
+      Tags:
+        - Key: Purpose
+          Value: Route53-Cost-Offset
+
+  OffsetDNSRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Sub '${OffsetSubdomain}.${DomainName}'
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt OffsetDistribution.DomainName
+        HostedZoneId: Z2FDTNDATAQYW2
+        EvaluateTargetHealth: false
+
+  OffsetDNSRecordIPv6:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Sub '${OffsetSubdomain}.${DomainName}'
+      Type: AAAA
+      AliasTarget:
+        DNSName: !GetAtt OffsetDistribution.DomainName
+        HostedZoneId: Z2FDTNDATAQYW2
+        EvaluateTargetHealth: false
+
+Outputs:
+  DistributionId:
+    Value: !Ref OffsetDistribution
+  
+  OffsetURL:
+    Value: !Sub 'https://${OffsetSubdomain}.${DomainName}'

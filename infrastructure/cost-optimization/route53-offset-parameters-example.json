@@ -1,0 +1,14 @@
+[
+  {
+    "ParameterKey": "HostedZoneId",
+    "ParameterValue": "XXXXXXXXXXXXXXXXXXXXX"
+  },
+  {
+    "ParameterKey": "DomainName",
+    "ParameterValue": "yourdomain.com"
+  },
+  {
+    "ParameterKey": "OffsetSubdomain",
+    "ParameterValue": "cost-offset"
+  }
+]
