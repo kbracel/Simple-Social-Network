@@ -12,7 +12,7 @@ Parameters:
     ConstraintDescription: must be the name of an existing EC2 KeyPair
 
   DBName:
-    Default: MyDatabase
+    Default: SocialDatabase
     Description: MySQL database name
     Type: String
     MinLength: 1
@@ -98,17 +98,21 @@ Resources:
             apt-get update
             
             echo 'Installing LAMP stack components...'
-            apt-get install -y mysql-server apache2 php php-mysql libapache2-mod-php certbot python3-certbot-apache dnsutils
+            apt-get install -y mysql-server apache2 php php-mysql libapache2-mod-php certbot python3-certbot-apache dnsutils git
 
             # 2. Configure MySQL
             echo 'Setting MySQL root password...'
             mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '${DBRootPassword}';"
 
+            echo 'Configuring MySQL for remote connections...'
+            sed -i 's/bind-address.*/bind-address = 0.0.0.0/' /etc/mysql/mysql.conf.d/mysqld.cnf
+            systemctl restart mysql
+
             echo 'Creating database and user...'
             mysql -u root -p'${DBRootPassword}' <<MYSQL_SCRIPT
             CREATE DATABASE IF NOT EXISTS ${DBName};
-            CREATE USER IF NOT EXISTS '${DBUser}'@'localhost' IDENTIFIED BY '${DBPassword}';
-            GRANT ALL PRIVILEGES ON ${DBName}.* TO '${DBUser}'@'localhost';
+            CREATE USER IF NOT EXISTS '${DBUser}'@'%' IDENTIFIED BY '${DBPassword}';
+            GRANT ALL PRIVILEGES ON ${DBName}.* TO '${DBUser}'@'%';
             FLUSH PRIVILEGES;
             MYSQL_SCRIPT
 
@@ -118,15 +122,34 @@ Resources:
             a2enmod rewrite
             a2enmod headers
 
+            # Create directory structure for the application
+            echo 'Cloning application repository...'
+            git clone https://github.com/kbracel/Simple-Social-Network.git /var/www/Simple-Social-Network
+
+            # Create config.php from template with database credentials
+            echo 'Creating config.php from template...'
+            cp /var/www/Simple-Social-Network/public_html/config_template.php /var/www/Simple-Social-Network/public_html/config.php
+            sed -i "s/define('DB_SERVER', '')/define('DB_SERVER', 'localhost')/" /var/www/Simple-Social-Network/public_html/config.php
+            sed -i "s/define('DB_USERNAME', '')/define('DB_USERNAME', '${DBUser}')/" /var/www/Simple-Social-Network/public_html/config.php
+            sed -i "s/define('DB_PASSWORD', '')/define('DB_PASSWORD', '${DBPassword}')/" /var/www/Simple-Social-Network/public_html/config.php
+            sed -i "s/define('DB_DATABASE', '')/define('DB_DATABASE', '${DBName}')/" /var/www/Simple-Social-Network/public_html/config.php
+
+            # Run database creation script
+            echo 'Creating database tables...'
+            mysql -u '${DBUser}' -p'${DBPassword}' '${DBName}' < /var/www/Simple-Social-Network/infrastructure/create_tables.sql
+
+            chown -R www-data:www-data /var/www/Simple-Social-Network
+            chmod -R 755 /var/www/Simple-Social-Network
+
             # Create Apache VirtualHost configuration with proper ServerName/ServerAlias
             echo 'Creating Apache VirtualHost configuration...'
             cat > /etc/apache2/sites-available/${DomainName}.conf <<APACHECONF
             <VirtualHost *:80>
                 ServerName ${DomainName}
                 ServerAlias www.${DomainName}
-                DocumentRoot /var/www/html
+                DocumentRoot /var/www/Simple-Social-Network/public_html
                 
-                <Directory /var/www/html>
+                <Directory /var/www/Simple-Social-Network/public_html>
                     Options Indexes FollowSymLinks
                     AllowOverride All
                     Require all granted
